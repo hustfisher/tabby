@@ -10,13 +10,14 @@ on:
       - 'crates/**'
       - 'ee/**'
       - '!ee/tabby-ui/**'
+      - '!ee/tabby-email/**'
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow_ref }}-${{ github.head_ref || github.ref_name }} 
-  
+  group: ${{ github.workflow_ref }}-${{ github.head_ref || github.ref_name }}
+
   # If this is enabled it will cancel current running and start latest
   cancel-in-progress: true
 
@@ -48,7 +49,7 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: install
-          args: cargo-machete
+          args: --version 0.7.0 cargo-machete
 
       - name: Cargo registry cache
         uses: actions/cache@v3
@@ -61,12 +62,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
 
-      - run: bash ./ci/prepare_build_environment.sh
+      - run: sudo bash ./ci/prepare_build_environment.sh
 
       - run: make fix
 
       - run: make update-graphql-schema
 
-      - run: make update-db-schema
-
-      - uses: autofix-ci/action@d3e591514b99d0fca6779455ff8338516663f7cc
+      - uses: autofix-ci/action@551dded8c6cc8a1054039c8bc0b8b48c51dfc6ef

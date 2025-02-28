@@ -1,23 +1,24 @@
 mod chat;
 mod completion;
 mod embedding;
+mod rate_limit;
 
 pub use chat::create as create_chat;
-pub use completion::create;
+pub use completion::{build_completion_prompt, create};
 pub use embedding::create as create_embedding;
-use serde_json::Value;
 
-pub(crate) fn get_param(params: &Value, key: &str) -> String {
-    params
-        .get(key)
-        .unwrap_or_else(|| panic!("Missing {} field", key))
-        .as_str()
-        .expect("Type unmatched")
-        .to_owned()
+fn create_reqwest_client(api_endpoint: &str) -> reqwest::Client {
+    let builder = reqwest::Client::builder();
+
+    let is_localhost = api_endpoint.starts_with("http://localhost")
+        || api_endpoint.starts_with("http://127.0.0.1");
+    let builder = if is_localhost {
+        builder.no_proxy()
+    } else {
+        builder
+    };
+
+    builder.build().unwrap()
 }
 
-pub(crate) fn get_optional_param(params: &Value, key: &str) -> Option<String> {
-    params
-        .get(key)
-        .map(|x| x.as_str().expect("Type unmatched").to_owned())
-}
+static AZURE_API_VERSION: &str = "2024-02-01";
