@@ -32,7 +32,7 @@ where
                 let body = Body::from(content.data);
                 let mime = mime_guess::from_path(&path).first_or_octet_stream();
                 let mut builder = Response::builder().header(header::CONTENT_TYPE, mime.as_ref());
-                if !path.ends_with(".html") {
+                if path.starts_with("_next/") {
                     builder = builder.header(header::CACHE_CONTROL, "public, max-age=604800");
                 };
                 builder
@@ -44,10 +44,27 @@ where
     }
 }
 
+fn set_path(path: &mut String, query: Option<&str>, base: &str) {
+    if let Some(q) = query {
+        if q.contains("_rsc=") {
+            format!("{}.txt", base).clone_into(path);
+            return;
+        }
+    }
+    format!("{}.html", base).clone_into(path);
+}
+
 pub async fn handler(uri: Uri) -> impl IntoResponse {
     let mut path = uri.path().trim_start_matches('/').to_string();
+    let query = uri.query();
     if path.is_empty() {
-        path = "index.html".to_owned()
+        "index.html".clone_into(&mut path)
+    } else if path.starts_with("files/") {
+        set_path(&mut path, query, "files");
+    } else if path.starts_with("search/") {
+        set_path(&mut path, query, "search");
+    } else if path.starts_with("pages/") {
+        set_path(&mut path, query, "pages");
     } else if !path.contains('.') && WebAssets::get(&format!("{}.html", path)).is_some() {
         path += ".html"
     }

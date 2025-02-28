@@ -1,73 +1,88 @@
 import React from 'react'
 import { foldGutter } from '@codemirror/language'
-import { Extension } from '@codemirror/state'
+import { openSearchPanel } from '@codemirror/search'
+import { Extension, Line } from '@codemirror/state'
 import { drawSelection, EditorView } from '@codemirror/view'
+import { isNil } from 'lodash-es'
 import { useTheme } from 'next-themes'
 
-import { EXP_enable_code_browser_quick_action_bar } from '@/lib/experiment-flags'
+import { useCopyToClipboard } from '@/lib/hooks/use-copy-to-clipboard'
+import { useHash } from '@/lib/hooks/use-hash'
 import { TCodeTag } from '@/lib/types'
+import { formatLineHashForCodeBrowser } from '@/lib/utils'
 import CodeEditor from '@/components/codemirror/codemirror'
 import { markTagNameExtension } from '@/components/codemirror/name-tag-extension'
 import { highlightTagExtension } from '@/components/codemirror/tag-range-highlight-extension'
 import { codeTagHoverTooltip } from '@/components/codemirror/tooltip-extesion'
 
-import { ActionBarWidgetExtension } from './action-bar-widget/action-bar-widget-extension'
+import { emitter, LineMenuActionEventPayload } from '../lib/event-emitter'
 import {
   selectLinesGutter,
   setSelectedLines
-} from './line-menu-extension/line-menu-extension'
+} from '../lib/line-menu-extension/line-menu-extension'
 import { SourceCodeBrowserContext } from './source-code-browser'
-import { resolveRepositoryInfoFromPath } from './utils'
+import {
+  generateEntryPath,
+  isValidLineHash,
+  parseLineNumberFromHash,
+  viewModelToKind
+} from './utils'
 
-import './line-menu-extension/line-menu.css'
+import '../lib/line-menu-extension/line-menu.css'
 
-import { isNaN } from 'lodash-es'
+import { EditorFileContext } from 'tabby-chat-panel/index'
 
-import { useCopyToClipboard } from '@/lib/hooks/use-copy-to-clipboard'
-import useRouterStuff from '@/lib/hooks/use-router-stuff'
+import { useLatest } from '@/lib/hooks/use-latest'
+import { filename2prism } from '@/lib/language-utils'
 
-import { emitter, LineMenuActionEventPayload } from '../lib/event-emitter'
+import { ActionBarWidgetExtension } from '../lib/action-bar-widget/action-bar-widget-extension'
+import { search } from '../lib/editor-search-extension/search'
+import { SearchPanel } from '../lib/editor-search-extension/search-panel'
+import { SelectionChangeExtension } from '../lib/selection-extension'
 
 interface CodeEditorViewProps {
   value: string
   language: string
+  className?: string
 }
 
 const CodeEditorView: React.FC<CodeEditorViewProps> = ({ value, language }) => {
   const { theme } = useTheme()
-  const { updateSearchParams, searchParams } = useRouterStuff()
   const tags: TCodeTag[] = React.useMemo(() => {
     return []
   }, [])
-  const initialized = React.useRef(false)
   const { copyToClipboard } = useCopyToClipboard({})
-  const line = searchParams.get('line')?.toString()
+  const [hash, updateHash] = useHash()
+  const lineNumber = parseLineNumberFromHash(hash)?.start
+  const endLineNumber = parseLineNumberFromHash(hash)?.end
   const [editorView, setEditorView] = React.useState<EditorView | null>(null)
 
-  const { isChatEnabled, activePath } = React.useContext(
-    SourceCodeBrowserContext
-  )
-  const filePath = React.useMemo(() => {
-    const { repositoryName, basename } =
-      resolveRepositoryInfoFromPath(activePath)
-    return `${repositoryName}/${basename}`
-  }, [activePath])
+  const {
+    isChatEnabled,
+    activePath,
+    activeEntryInfo,
+    activeRepo,
+    activeRepoRef,
+    textEditorViewRef
+  } = React.useContext(SourceCodeBrowserContext)
+  const { basename } = activeEntryInfo
+  const gitUrl = activeRepo?.gitUrl ?? ''
 
   const extensions = React.useMemo(() => {
-    let result: Extension[] = [
-      EditorView.baseTheme({
-        '.cm-scroller': {
-          fontSize: '14px'
-        },
-        '.cm-gutters': {
-          backgroundColor: 'transparent',
-          borderRight: 'none'
-        }
-      }),
+    const result: Extension[] = [
       selectLinesGutter({
-        onSelectLine: v => {
-          if (v === -1 || isNaN(v)) return
-          updateSearchParams({ set: { line: String(v) } })
+        onSelectLine: range => {
+          if (!range) {
+            updateHash('')
+            return
+          }
+
+          updateHash(
+            formatLineHashForCodeBrowser({
+              start: range.line,
+              end: range.endLine
+            })
+          )
         }
       }),
       foldGutter({
@@ -84,14 +99,57 @@ const CodeEditorView: React.FC<CodeEditorViewProps> = ({ value, language }) => {
           return dom
         }
       }),
-      drawSelection()
+      drawSelection(),
+      search({
+        createPanel: config => new SearchPanel(config)
+      })
     ]
-    if (
-      EXP_enable_code_browser_quick_action_bar.value &&
-      isChatEnabled &&
-      activePath
-    ) {
-      result.push(ActionBarWidgetExtension({ language, path: filePath }))
+    if (isChatEnabled) {
+      result.push(
+        SelectionChangeExtension(
+          (
+            context:
+              | {
+                  content: string
+                }
+              | {
+                  content: string
+                  startLine: number
+                  endLine: number
+                }
+              | null
+          ) => {
+            if (!context || !activeEntryInfo?.basename || !activeRepo) {
+              return null
+            }
+
+            const editorFileContext: EditorFileContext = {
+              kind: 'file',
+              filepath: {
+                kind: 'git',
+                filepath: activeEntryInfo.basename,
+                gitUrl: activeRepo?.gitUrl
+              },
+              range:
+                'startLine' in context
+                  ? {
+                      start: context.startLine,
+                      end: context.endLine
+                    }
+                  : undefined,
+              content: context.content
+            }
+
+            emitter.emit('selection_change', editorFileContext)
+          }
+        )
+      )
+    }
+
+    if (isChatEnabled && activePath && basename) {
+      result.push(
+        ActionBarWidgetExtension({ language, path: basename, gitUrl })
+      )
     }
     if (value && tags) {
       result.push(
@@ -106,16 +164,52 @@ const CodeEditorView: React.FC<CodeEditorViewProps> = ({ value, language }) => {
 
   React.useEffect(() => {
     const onClickLineMenu = (data: LineMenuActionEventPayload) => {
-      if (!line) return
-      if (data.action === 'copy_permalink') {
-        copyToClipboard(window.location.href)
+      if (typeof lineNumber !== 'number') return
+      if (data.action === 'copy-permalink') {
+        const _link = generateEntryPath(
+          activeRepo,
+          activeRepoRef?.ref?.commit ?? activeRepoRef?.name,
+          activeEntryInfo.basename ?? '',
+          viewModelToKind(activeEntryInfo.viewMode)
+        )
+        const link = new URL(`${window.location.origin}/files/${_link}`)
+
+        // set hash
+        if (isValidLineHash(window.location.hash)) {
+          link.hash = window.location.hash
+        }
+
+        // set search
+        const detectedLanguage = activeEntryInfo.basename
+          ? filename2prism(activeEntryInfo.basename)[0]
+          : undefined
+        const isMarkdown = detectedLanguage === 'markdown'
+        if (isMarkdown) {
+          link.searchParams.set('plain', '1')
+        }
+
+        copyToClipboard(link.toString())
         return
       }
-      if (data.action === 'copy_line') {
-        const lineNumber = parseInt(line)
-        const lineObject = editorView?.state?.doc?.line(lineNumber)
-        if (lineObject) {
-          copyToClipboard(lineObject.text)
+      if (data.action === 'copy-line') {
+        if (!editorView) return
+        const line = editorView.state.doc.line(lineNumber)
+        let endLine: Line | undefined = undefined
+        let content: string | undefined
+
+        if (endLineNumber) {
+          endLine = editorView.state.doc.line(endLineNumber)
+        }
+        // check if line and endLine are valid
+        if (line && endLine && line.number <= endLine.number) {
+          const startPos = line.from
+          const endPos = endLine.to
+          content = editorView.state.doc.slice(startPos, endPos).toString()
+        } else if (line) {
+          content = line.text
+        }
+        if (content) {
+          copyToClipboard(content)
         }
       }
     }
@@ -124,24 +218,74 @@ const CodeEditorView: React.FC<CodeEditorViewProps> = ({ value, language }) => {
     return () => {
       emitter.off('line_menu_action', onClickLineMenu)
     }
-  }, [value, line])
+  }, [value, lineNumber, endLineNumber, editorView])
 
   React.useEffect(() => {
-    if (initialized.current) return
-    if (line && editorView && value) {
+    if (!isNil(lineNumber) && editorView && value) {
       try {
-        initialized.current = true
-        const lineNumber = parseInt(line)
-        const lineObject = editorView?.state?.doc?.line(lineNumber)
-        if (lineObject) {
-          setSelectedLines(editorView, lineObject.from)
+        const lineInfo = editorView?.state?.doc?.line(lineNumber)
+        const endLineInfo = !isNil(endLineNumber)
+          ? editorView?.state?.doc?.line(endLineNumber)
+          : null
+
+        if (lineInfo) {
+          const lineNumber = lineInfo.number
+          const endLineNumber = endLineInfo?.number
+          setSelectedLines(editorView, {
+            line: lineNumber,
+            endLine: endLineNumber
+          })
+          if (isPositionInView(editorView, lineInfo.from, 90)) {
+            return
+          }
+          editorView.dispatch({
+            effects: EditorView.scrollIntoView(lineInfo.from, {
+              y: 'start',
+              yMargin: 200
+            })
+          })
         }
       } catch (e) {}
     }
-  }, [value, line, editorView])
+
+    return () => {
+      if (editorView) {
+        setSelectedLines(editorView, null)
+      }
+    }
+  }, [value, lineNumber, editorView])
+
+  const openSearch = useLatest(() => {
+    if (editorView) {
+      openSearchPanel(editorView)
+    }
+  })
+
+  React.useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!editorView) return
+
+      const isMac = navigator.userAgent.toUpperCase().indexOf('MAC') >= 0
+      const isFindInPageShortcut =
+        (isMac ? event.metaKey : event.ctrlKey) && event.key === 'f'
+      if (isFindInPageShortcut) {
+        event.preventDefault()
+        openSearch.current()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    textEditorViewRef.current = editorView
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      emitter.emit('selection_change', null)
+    }
+  }, [editorView])
 
   return (
     <CodeEditor
+      className="pb-2"
       value={value}
       theme={theme}
       language={language}
@@ -150,6 +294,24 @@ const CodeEditorView: React.FC<CodeEditorViewProps> = ({ value, language }) => {
       viewDidUpdate={view => setEditorView(view)}
     />
   )
+}
+
+function isPositionInView(
+  view: EditorView,
+  pos: number,
+  offsetTop: number = 0
+) {
+  const node = view.domAtPos(pos).node
+  const lineElement =
+    node.nodeType === 3 ? node.parentElement : (node as HTMLElement)
+  if (lineElement) {
+    const rect = lineElement.getBoundingClientRect()
+    const viewportHeight =
+      window.innerHeight || document.documentElement.clientHeight
+    return rect.top >= offsetTop && rect.bottom <= viewportHeight
+  }
+
+  return false
 }
 
 export default CodeEditorView

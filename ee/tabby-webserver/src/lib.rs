@@ -2,8 +2,10 @@
 mod axum;
 mod hub;
 mod jwt;
+mod ldap;
 mod oauth;
 mod path;
+mod rate_limit;
 mod routes;
 mod service;
 mod webserver;
@@ -15,7 +17,7 @@ pub mod public {
 
     pub use super::{
         /* used by tabby workers (consumer of /hub api) */
-        hub::{create_worker_client, RegisterWorkerRequest, WorkerClient, WorkerKind},
+        hub::{create_worker_client, WorkerClient},
         webserver::Webserver,
     };
 }
